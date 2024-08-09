@@ -84,7 +84,7 @@ end
 function CheckSell(order, quote)
   if quote.name == order.name then
     if order.order_type == OrderType.MARKET_SELL then
-      order.executed = false
+      order.executed = true
       order.executed_price = quote.bid
       return true
     elseif order.order_type == OrderType.LIMIT_SELL then
@@ -182,9 +182,14 @@ function MovingAverageStrategy:tick(quotes)
 
   -- Update values
   for _, quote in pairs(quotes) do
-    if self.holdings == quote.name then
+    if self.holdings[quote.name] == nil then
+      position_values[quote.name] = 0
+    else
       local position = self.holdings[quote.name]
-      local position_value = quote.bid * position.qty
+      local position_value = 0
+      if position == nil then
+        position_value = quote.bid * position
+      end
 
       position_values[quote.name] = position_value
       portfolio_value = portfolio_value + position_value
@@ -193,13 +198,18 @@ function MovingAverageStrategy:tick(quotes)
 
   -- Update quote_buffer
   for _, quote in pairs(quotes) do
+    if self.quote_buffer[quote.name] == nil then
+      self.quote_buffer[quote.name] = {}
+    end
+
     local curr_buffer = self.quote_buffer[quote.name]
     if #curr_buffer < self.window_length then
-      curr_buffer[#curr_buffer+1] = quote
+      curr_buffer[#curr_buffer+1] = quote.offer
     else
-      curr_buffer.remove(0)
-      curr_buffer[#curr_buffer+1] = quote
+      table.remove(curr_buffer, 1)
+      curr_buffer[#curr_buffer+1] = quote.offer
     end
+    self.quote_buffer[quote.name] = curr_buffer
   end
 
   local averages = {}
@@ -212,16 +222,42 @@ function MovingAverageStrategy:tick(quotes)
     averages[key] = sum / #buffer
   end
 
+
   -- Find portfolio target weight
-  local signals = {}
+  local orders = {}
   for _, quote in pairs(quotes) do
     local price = quote.offer
     local average = averages[quote.name]
 
-    signals[quote.name] = (price/average) - 1
+    local signal = ((price/average) - 1) * 100
+
+    local diff = 0
+    -- Buy signal
+    if signal > 5 then
+      local target_value = portfolio_value * 0.48
+      local target_qty = target_value / quote.offer
+      local curr_qty = position_values[quote.name]
+      diff = math.floor(target_qty - curr_qty)
+    end
+
+    -- Sell signal
+    if signal < -5 then
+      local curr_qty =  position_values[quote.name]
+      if curr_qty > 0 then
+        diff = -curr_qty
+      end
+    end
+
+    if diff > 0 then
+      local order = Order:new_market(quote.name, diff, OrderType.MARKET_BUY)
+      orders[#orders+1] = order
+    elseif diff < 0 then
+      local order = Order:new_market(quote.name, diff, OrderType.MARKET_SELL)
+      orders[#orders+1] = order
+    end
   end
 
-  print(inspect(signals))
+  return orders
 end
 
 Names = {"ABC", "BCD"}
@@ -229,24 +265,24 @@ Length = 100
 local quotes = GenerateRandomQuotes(Names, Length)
 local strategy = MovingAverageStrategy:new()
 local orderbook = OrderBook:new()
-orderbook:insert(Order:new_market("ABC", 100, OrderType.MARKET_BUY))
---orderbook:insert(Order:new_market("ABC", 100, OrderType.MARKET_SELL))
-
-
---orderbook:insert(Order:new_limit("ABC", 91, OrderType.LIMIT_BUY, 100))
---orderbook:insert(Order:new_limit("ABC", 100, OrderType.LIMIT_BUY, 1))
---orderbook:insert(Order:new_limit("ABC", 109, OrderType.LIMIT_SELL, 100))
---orderbook:insert(Order:new_limit("ABC", 100, OrderType.LIMIT_SELL, 1000))
 
 for i = 1, Length, 1 do
   local result = ExecuteOrders(i, orderbook, quotes)
   if result.executed_orders ~= nil then
+    print(inspect(result.executed_orders))
     for _, order in ipairs(result.executed_orders) do
       strategy:update(order)
     end
-    print(inspect(strategy))
+  end
+  orderbook.orders = result.orderbook_diff
+
+  local date_quotes = quotes[i]
+  local orders = strategy:tick(date_quotes)
+
+  for _, order in ipairs(orders) do
+    orderbook:insert(order)
   end
 
-  orderbook.orders = result.orderbook_diff
+
 end
 
